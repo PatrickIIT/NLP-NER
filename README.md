@@ -75,6 +75,15 @@ The dataset is preprocessed to align the tokenized inputs with the corresponding
 Example preprocessing function:
 ```python
 def tokenize_and_align_labels(examples):
+    """
+    Tokenize the dataset and align labels with tokenized input.
+    Preserve the original 'tokens' field for later use.
+    """
+    from transformers import RobertaTokenizerFast
+
+    # Step 2: Load the pretrained tokenizer with add_prefix_space=True
+    tokenizer = RobertaTokenizerFast.from_pretrained('benjamin/roberta-base-wechsel-swahili', add_prefix_space=True)
+
     tokenized_inputs = tokenizer(
         examples["tokens"],
         truncation=True,
@@ -82,21 +91,29 @@ def tokenize_and_align_labels(examples):
         max_length=128,
         is_split_into_words=True
     )
+
+    # Align labels with tokenized input
     labels = []
-    for i, label in enumerate(examples["ner_tags"]):
-        word_ids = tokenized_inputs.word_ids(batch_index=i)
+    for i, label in enumerate(examples[f"ner_tags"]):
+        word_ids = tokenized_inputs.word_ids(batch_index=i)  # Map tokens to their respective word
         previous_word_idx = None
         label_ids = []
+
         for word_idx in word_ids:
             if word_idx is None:
-                label_ids.append(-100)  # Special tokens
+                label_ids.append(-100)  # Special token (e.g., [CLS], [SEP])
             elif word_idx != previous_word_idx:
                 label_ids.append(label[word_idx])  # New word
             else:
                 label_ids.append(-100)  # Subword of the same word
             previous_word_idx = word_idx
+
         labels.append(label_ids)
+
+    # Add the original 'tokens' field to the tokenized dataset
+    tokenized_inputs["tokens"] = examples["tokens"]
     tokenized_inputs["labels"] = labels
+
     return tokenized_inputs
 ```
 
@@ -109,18 +126,18 @@ The model is fine-tuned using the `Trainer` API from the Hugging Face `transform
 ### Training Arguments
 ```python
 training_args = TrainingArguments(
-    output_dir="./results",
-    evaluation_strategy="epoch",
-    save_strategy="epoch",
-    logging_dir="./logs",
-    logging_steps=100,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=32,
-    num_train_epochs=5,
-    learning_rate=5e-5,
-    weight_decay=0.01,
-    load_best_model_at_end=True,
-    metric_for_best_model="accuracy"
+    output_dir="./results",               # Save directory
+    evaluation_strategy="epoch",         # Evaluate after each epoch
+    save_strategy="epoch",               # Save model after each epoch
+    logging_dir="./logs",                # Directory for logs
+    logging_steps=100,                   # Log every 100 steps
+    per_device_train_batch_size=16,      # Batch size for training
+    per_device_eval_batch_size=32,       # Batch size for evaluation
+    num_train_epochs=5,                  # Total number of epochs
+    learning_rate=5e-5,                  # Learning rate
+    weight_decay=0.01,                   # Weight decay for regularization
+    load_best_model_at_end=True,         # Load the best model at the end
+    metric_for_best_model="accuracy",    # Use accuracy for selecting the best model
 )
 ```
 
@@ -140,7 +157,7 @@ trainer = Trainer(
     train_dataset=tokenized_datasets["train"],
     eval_dataset=tokenized_datasets["validation"],
     tokenizer=tokenizer,
-    data_collator=data_collator,
+    data_collator=data_collator,  # Use the data collator
     compute_metrics=compute_metrics
 )
 ```
@@ -162,44 +179,36 @@ After training, the model's predictions are validated by Swahili speakers to ens
 ### Example Validation Code
 ```python
 def extract_named_entities(predictions, tokenized_test_set):
-    entity_count = 0
-    sample_entities = []
-    for i, prediction in enumerate(predictions):
-        tokenized_input = tokenized_test_set[i]
-        word_ids = tokenized_input.get("word_ids", [])
-        tokens = tokenized_test_set["tokens"][i]
+    entities = []
+    label_list = tokenized_test_set.features["ner_tags"].feature.names
 
-        current_entity = None
+    for pred, example in zip(predictions, tokenized_test_set):
+        tokens = example["tokens"]
+        word_ids = example["input_ids"]
+
+        current_entity = []
         entity_type = None
-        for j, (p, word_id) in enumerate(zip(prediction, word_ids)):
+
+        for idx, (p, word_id) in enumerate(zip(pred, word_ids)):
             if word_id is None or word_id >= len(tokens):
-                continue
+                continue  # Skip padding or special tokens
 
-            if p != 0 and p % 2 == 1:  # Start of an entity (B- prefix)
-                if current_entity:
-                    sample_entities.append((current_entity, entity_type))
-                    entity_count += 1
-                    if entity_count >= 500:
-                        break
-                current_entity = [tokens[word_id]]
-                entity_type = dataset["train"].features["ner_tags"].feature.names[p // 2]
-
-            elif p != 0 and p % 2 == 0:  # Inside the same entity (I- prefix)
-                if current_entity:
+            label = label_list[p]
+            if label != "O":  # If it's a named entity
+                if not current_entity:
+                    entity_type = label.split("-")[-1]
                     current_entity.append(tokens[word_id])
-
-            else:  # End of an entity
+                else:
+                    current_entity.append(tokens[word_id])
+            else:
                 if current_entity:
-                    sample_entities.append((current_entity, entity_type))
-                    entity_count += 1
-                    if entity_count >= 500:
-                        break
-                current_entity = None
+                    entities.append((" ".join(current_entity), entity_type))
+                    current_entity = []
 
-        if entity_count >= 500:
-            break
+        if current_entity:
+            entities.append((" ".join(current_entity), entity_type))
 
-    return sample_entities[:500]
+    return entities[:500]  # Return first 500 entities
 ```
 
 ---
